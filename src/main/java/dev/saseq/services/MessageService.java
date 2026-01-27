@@ -418,6 +418,113 @@ public class MessageService {
                            replies.size(), messageId, totalSearched, String.join("\n", formattedReplies));
     }
 
+    /**
+     * Lists all threads (active and archived) in a specified channel.
+     *
+     * @param channelId The ID of the channel to list threads from.
+     * @return A formatted string with thread information.
+     */
+    @Tool(name = "list_threads", description = "List all threads in a channel")
+    public String listThreads(@ToolParam(description = "Channel ID to list threads from") String channelId) {
+        if (channelId == null || channelId.isEmpty()) {
+            throw new IllegalArgumentException("channelId cannot be null");
+        }
+
+        TextChannel channel = jda.getTextChannelById(channelId);
+        if (channel == null) {
+            throw new IllegalArgumentException("Channel not found by ID: " + channelId);
+        }
+
+        List<ThreadChannel> threads = new java.util.ArrayList<>();
+
+        // Get active threads
+        threads.addAll(channel.getThreadChannels());
+
+        // Get archived public threads
+        try {
+            List<ThreadChannel> archivedPublic = channel.retrieveArchivedPublicThreadChannels().complete();
+            threads.addAll(archivedPublic);
+        } catch (Exception e) {
+            // Continue if archived threads retrieval fails
+        }
+
+        if (threads.isEmpty()) {
+            return String.format("No threads found in channel %s", channelId);
+        }
+
+        StringBuilder result = new StringBuilder();
+        result.append(String.format("**Found %d threads in channel %s:**\n", threads.size(), channelId));
+
+        for (ThreadChannel thread : threads) {
+            result.append(String.format("\n- **%s** (ID: %s)\n", thread.getName(), thread.getId()));
+            result.append(String.format("  Created: %s\n", thread.getTimeCreated().toString()));
+            result.append(String.format("  Archived: %s\n", thread.isArchived()));
+            result.append(String.format("  Message count: %d\n", thread.getMessageCount()));
+            result.append(String.format("  Jump URL: %s\n", thread.getJumpUrl()));
+        }
+
+        return result.toString();
+    }
+
+    /**
+     * Reads messages from a Discord thread. This is a convenience method that makes it explicit
+     * that you're reading from a thread rather than a channel.
+     *
+     * @param threadId The ID of the thread to read messages from.
+     * @param count    Optional number of messages to retrieve (default is 100).
+     * @return A formatted string containing the retrieved messages.
+     */
+    @Tool(name = "read_thread_messages", description = "Read messages from a Discord thread. Threads are conversations branched from a message.")
+    public String readThreadMessages(@ToolParam(description = "Thread ID") String threadId,
+                                      @ToolParam(description = "Number of messages to retrieve", required = false) String count) {
+        if (threadId == null || threadId.isEmpty()) {
+            throw new IllegalArgumentException("threadId cannot be null");
+        }
+
+        // Verify it's actually a thread
+        ThreadChannel thread = jda.getThreadChannelById(threadId);
+        if (thread == null) {
+            throw new IllegalArgumentException("Thread not found by ID: " + threadId);
+        }
+
+        // Use the existing readMessages method which already supports threads via resolveChannel
+        return readMessages(threadId, count);
+    }
+
+    /**
+     * Gets detailed information about a specific thread.
+     *
+     * @param threadId The ID of the thread to get information about.
+     * @return A formatted string with thread details.
+     */
+    @Tool(name = "get_thread_info", description = "Get information about a specific thread")
+    public String getThreadInfo(@ToolParam(description = "Thread ID") String threadId) {
+        if (threadId == null || threadId.isEmpty()) {
+            throw new IllegalArgumentException("threadId cannot be null");
+        }
+
+        ThreadChannel thread = jda.getThreadChannelById(threadId);
+        if (thread == null) {
+            throw new IllegalArgumentException("Thread not found by ID: " + threadId);
+        }
+
+        StringBuilder info = new StringBuilder();
+        info.append(String.format("**Thread Info (ID: %s)**\n", threadId));
+        info.append(String.format("Name: %s\n", thread.getName()));
+        info.append(String.format("Parent Channel: %s (%s)\n",
+                                thread.getParentChannel().getName(),
+                                thread.getParentChannel().getId()));
+        info.append(String.format("Created: %s\n", thread.getTimeCreated().toString()));
+        info.append(String.format("Owner: %s\n", thread.getOwner() != null ? thread.getOwner().getUser().getName() : "Unknown"));
+        info.append(String.format("Archived: %s\n", thread.isArchived()));
+        info.append(String.format("Locked: %s\n", thread.isLocked()));
+        info.append(String.format("Message Count: %d\n", thread.getMessageCount()));
+        info.append(String.format("Member Count: %d\n", thread.getMemberCount()));
+        info.append(String.format("Jump URL: %s\n", thread.getJumpUrl()));
+
+        return info.toString();
+    }
+
     private List<String> formatMessages(List<Message> messages) {
         return messages.stream()
                 .map(m -> {
