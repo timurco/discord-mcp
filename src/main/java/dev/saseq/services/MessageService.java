@@ -297,6 +297,127 @@ public class MessageService {
                            matchingMessages.size(), searchText, totalSearched, String.join("\n", formattedMessages));
     }
 
+    /**
+     * Gets detailed information about a specific message, including reply information.
+     *
+     * @param channelId The ID of the channel containing the message.
+     * @param messageId The ID of the message to get information about.
+     * @return A formatted string with message details including reply information if applicable.
+     */
+    @Tool(name = "get_message_info", description = "Get detailed information about a specific message, including reply information")
+    public String getMessageInfo(@ToolParam(description = "Discord channel or thread ID") String channelId,
+                                  @ToolParam(description = "Message ID to get info about") String messageId) {
+        if (channelId == null || channelId.isEmpty()) {
+            throw new IllegalArgumentException("channelId cannot be null");
+        }
+        if (messageId == null || messageId.isEmpty()) {
+            throw new IllegalArgumentException("messageId cannot be null");
+        }
+
+        MessageChannel channel = resolveChannel(channelId);
+        Message message = channel.retrieveMessageById(messageId).complete();
+        if (message == null) {
+            throw new IllegalArgumentException("Message not found by messageId");
+        }
+
+        StringBuilder info = new StringBuilder();
+        info.append(String.format("**Message Info (ID: %s)**\n", messageId));
+        info.append(String.format("Author: %s\n", message.getAuthor().getName()));
+        info.append(String.format("Timestamp: %s\n", message.getTimeCreated().toString()));
+        info.append(String.format("Content: ```%s```\n", message.getContentDisplay()));
+        info.append(String.format("Jump URL: %s\n", message.getJumpUrl()));
+
+        // Check if this is a reply to another message
+        if (message.getMessageReference() != null) {
+            info.append("\n**Reply Information:**\n");
+            info.append(String.format("This message is a reply to message ID: %s\n",
+                                    message.getMessageReference().getMessageId()));
+
+            // Try to get the referenced message
+            try {
+                Message referencedMessage = message.getReferencedMessage();
+                if (referencedMessage != null) {
+                    info.append(String.format("Original message author: %s\n",
+                                            referencedMessage.getAuthor().getName()));
+                    info.append(String.format("Original message content: ```%s```\n",
+                                            referencedMessage.getContentDisplay()));
+                    info.append(String.format("Original message link: %s\n",
+                                            referencedMessage.getJumpUrl()));
+                }
+            } catch (Exception e) {
+                info.append("(Could not retrieve referenced message details)\n");
+            }
+        } else {
+            info.append("\nThis message is not a reply to another message.\n");
+        }
+
+        return info.toString();
+    }
+
+    /**
+     * Gets all replies to a specific message by searching through message history.
+     *
+     * @param channelId    The ID of the channel containing the message.
+     * @param messageId    The ID of the message to find replies for.
+     * @param maxMessages  Optional maximum number of messages to search (default 200).
+     * @return A formatted string with all replies to the specified message.
+     */
+    @Tool(name = "get_message_replies", description = "Get all replies to a specific message")
+    public String getMessageReplies(@ToolParam(description = "Discord channel or thread ID") String channelId,
+                                     @ToolParam(description = "Message ID to find replies for") String messageId,
+                                     @ToolParam(description = "Maximum number of messages to search (default 200)", required = false) String maxMessages) {
+        if (channelId == null || channelId.isEmpty()) {
+            throw new IllegalArgumentException("channelId cannot be null");
+        }
+        if (messageId == null || messageId.isEmpty()) {
+            throw new IllegalArgumentException("messageId cannot be null");
+        }
+
+        int maxToSearch = 200;
+        if (maxMessages != null) {
+            maxToSearch = Integer.parseInt(maxMessages);
+        }
+
+        MessageChannel channel = resolveChannel(channelId);
+        List<Message> replies = new java.util.ArrayList<>();
+
+        // Search for messages that reply to the specified message
+        String lastMessageId = null;
+        int totalSearched = 0;
+
+        while (totalSearched < maxToSearch) {
+            int batchSize = Math.min(100, maxToSearch - totalSearched);
+            List<Message> batch;
+
+            if (lastMessageId == null) {
+                batch = channel.getHistory().retrievePast(batchSize).complete();
+            } else {
+                batch = channel.getHistoryBefore(lastMessageId, batchSize).complete().getRetrievedHistory();
+            }
+
+            if (batch.isEmpty()) {
+                break;
+            }
+
+            // Filter messages that are replies to our target message
+            batch.stream()
+                    .filter(m -> m.getMessageReference() != null
+                              && messageId.equals(m.getMessageReference().getMessageId()))
+                    .forEach(replies::add);
+
+            lastMessageId = batch.get(batch.size() - 1).getId();
+            totalSearched += batch.size();
+        }
+
+        if (replies.isEmpty()) {
+            return String.format("No replies found to message %s (searched %d messages).", messageId, totalSearched);
+        }
+
+        List<String> formattedReplies = formatMessages(replies);
+        return String.format("**Found %d replies to message %s (searched %d messages):**\n%s",
+                           replies.size(), messageId, totalSearched, String.join("\n", formattedReplies));
+    }
+
     private List<String> formatMessages(List<Message> messages) {
         return messages.stream()
                 .map(m -> {
@@ -305,7 +426,14 @@ public class MessageService {
                     String content = m.getContentDisplay();
                     String messageId = m.getId();
 
-                    return String.format("- (ID: %s) **[%s]** `%s`: ```%s```", messageId, authorName, timestamp, content);
+                    // Add reply indicator if this is a reply
+                    String replyInfo = "";
+                    if (m.getMessageReference() != null) {
+                        replyInfo = String.format(" [Reply to: %s]", m.getMessageReference().getMessageId());
+                    }
+
+                    return String.format("- (ID: %s) **[%s]** `%s`%s: ```%s```",
+                                       messageId, authorName, timestamp, replyInfo, content);
                 }).toList();
     }
 }
