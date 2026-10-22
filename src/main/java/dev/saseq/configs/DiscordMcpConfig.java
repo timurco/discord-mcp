@@ -44,7 +44,7 @@ public class DiscordMcpConfig {
             System.exit(1);
         }
         return JDABuilder.createDefault(token)
-                .enableIntents(GatewayIntent.GUILD_MEMBERS)
+                .enableIntents(GatewayIntent.GUILD_MEMBERS, GatewayIntent.MESSAGE_CONTENT)
                 .build();
     }
 }

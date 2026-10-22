@@ -6,12 +6,20 @@ import net.dv8tion.jda.api.entities.channel.concrete.TextChannel;
 import net.dv8tion.jda.api.entities.channel.concrete.ThreadChannel;
 import net.dv8tion.jda.api.entities.channel.middleman.MessageChannel;
 import net.dv8tion.jda.api.entities.emoji.Emoji;
+import net.dv8tion.jda.api.utils.FileUpload;
 import org.springframework.ai.tool.annotation.Tool;
 import org.springframework.ai.tool.annotation.ToolParam;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
+import java.io.File;
+import java.io.InputStream;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
+import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.CompletableFuture;
 
 @Service
 public class MessageService {
@@ -40,9 +48,10 @@ public class MessageService {
      * @param message   The content of the message to be sent.
      * @return A confirmation message with a link to the sent message.
      */
-    @Tool(name = "send_message", description = "Send a message to a specific channel or thread")
+    @Tool(name = "send_message", description = "Send a message to a specific channel or thread, optionally as a reply")
     public String sendMessage(@ToolParam(description = "Discord channel or thread ID") String channelId,
-                              @ToolParam(description = "Message content") String message) {
+                              @ToolParam(description = "Message content") String message,
+                              @ToolParam(description = "Message ID to reply to (optional)", required = false) String replyToMessageId) {
         if (channelId == null || channelId.isEmpty()) {
             throw new IllegalArgumentException("channelId cannot be null");
         }
@@ -51,8 +60,53 @@ public class MessageService {
         }
 
         MessageChannel channel = resolveChannel(channelId);
-        Message sentMessage = channel.sendMessage(message).complete();
+        var action = channel.sendMessage(message);
+        if (replyToMessageId != null && !replyToMessageId.isEmpty()) {
+            action = action.setMessageReference(replyToMessageId);
+        }
+        Message sentMessage = action.complete();
         return "Message sent successfully. Message link: " + sentMessage.getJumpUrl();
+    }
+
+    /**
+     * Sends a message with file attachments to a specified Discord channel or thread.
+     *
+     * @param channelId The ID of the channel or thread where the message will be sent.
+     * @param message   Optional text content of the message (can be empty if only sending files).
+     * @param filePaths Comma-separated absolute file paths to attach.
+     * @return A confirmation message with a link to the sent message.
+     */
+    @Tool(name = "send_message_with_files", description = "Send a message with file attachments to a channel or thread. Supports images, videos, and other files.")
+    public String sendMessageWithFiles(@ToolParam(description = "Discord channel or thread ID") String channelId,
+                                       @ToolParam(description = "Message content (optional, can be empty)", required = false) String message,
+                                       @ToolParam(description = "Comma-separated absolute file paths to attach") String filePaths) {
+        if (channelId == null || channelId.isEmpty()) {
+            throw new IllegalArgumentException("channelId cannot be null");
+        }
+        if (filePaths == null || filePaths.isEmpty()) {
+            throw new IllegalArgumentException("filePaths cannot be null");
+        }
+
+        MessageChannel channel = resolveChannel(channelId);
+
+        List<FileUpload> uploads = new ArrayList<>();
+        for (String path : filePaths.split(",")) {
+            File file = new File(path.trim());
+            if (!file.exists()) {
+                throw new IllegalArgumentException("File not found: " + path.trim());
+            }
+            uploads.add(FileUpload.fromData(file));
+        }
+
+        Message sentMessage;
+        if (message != null && !message.isEmpty()) {
+            sentMessage = channel.sendMessage(message)
+                    .addFiles(uploads)
+                    .complete();
+        } else {
+            sentMessage = channel.sendFiles(uploads).complete();
+        }
+        return "Message with files sent successfully. Message link: " + sentMessage.getJumpUrl();
     }
 
     /**
@@ -351,7 +405,76 @@ public class MessageService {
             info.append("\nThis message is not a reply to another message.\n");
         }
 
+        // Include attachments
+        if (!message.getAttachments().isEmpty()) {
+            info.append("\n**Attachments:**\n");
+            for (net.dv8tion.jda.api.entities.Message.Attachment attachment : message.getAttachments()) {
+                info.append(String.format("- %s (%s): %s\n",
+                    attachment.getFileName(),
+                    attachment.getContentType() != null ? attachment.getContentType() : "unknown",
+                    attachment.getUrl()));
+            }
+        }
+
+        // Include embeds
+        if (!message.getEmbeds().isEmpty()) {
+            info.append("\n**Embeds:**\n");
+            for (net.dv8tion.jda.api.entities.MessageEmbed embed : message.getEmbeds()) {
+                if (embed.getTitle() != null) info.append(String.format("- Title: %s\n", embed.getTitle()));
+                if (embed.getDescription() != null) info.append(String.format("  Description: %s\n", embed.getDescription()));
+                if (embed.getUrl() != null) info.append(String.format("  URL: %s\n", embed.getUrl()));
+                if (embed.getImage() != null) info.append(String.format("  Image: %s\n", embed.getImage().getUrl()));
+                if (embed.getThumbnail() != null) info.append(String.format("  Thumbnail: %s\n", embed.getThumbnail().getUrl()));
+            }
+        }
+
         return info.toString();
+    }
+
+    @Tool(name = "download_media", description = "Download all image/video attachments from a Discord message to /tmp/ and return local file paths")
+    public String downloadMedia(@ToolParam(description = "Discord channel or thread ID") String channelId,
+                                @ToolParam(description = "Message ID to download attachments from") String messageId) {
+        MessageChannel channel = resolveChannel(channelId);
+        if (channel == null) return "Error: Channel not found: " + channelId;
+
+        Message message;
+        try {
+            message = channel.retrieveMessageById(messageId).complete();
+        } catch (Exception e) {
+            return "Error: Could not retrieve message: " + e.getMessage();
+        }
+
+        if (message.getAttachments().isEmpty()) {
+            return "No attachments found on this message.";
+        }
+
+        StringBuilder result = new StringBuilder();
+        result.append(String.format("**Downloaded %d attachment(s):**\n", message.getAttachments().size()));
+
+        for (Message.Attachment attachment : message.getAttachments()) {
+            String fileName = messageId + "_" + attachment.getFileName();
+            Path targetPath = Path.of("/tmp", fileName);
+            try {
+                CompletableFuture<InputStream> future = attachment.getProxy().download();
+                try (InputStream is = future.join()) {
+                    Files.copy(is, targetPath, StandardCopyOption.REPLACE_EXISTING);
+                }
+                result.append(String.format("- %s → %s (%s, %s)\n",
+                    attachment.getFileName(), targetPath,
+                    attachment.getContentType() != null ? attachment.getContentType() : "unknown",
+                    formatSize(attachment.getSize())));
+            } catch (Exception e) {
+                result.append(String.format("- %s → FAILED: %s\n", attachment.getFileName(), e.getMessage()));
+            }
+        }
+
+        return result.toString();
+    }
+
+    private String formatSize(int bytes) {
+        if (bytes < 1024) return bytes + "B";
+        if (bytes < 1024 * 1024) return String.format("%.1fKB", bytes / 1024.0);
+        return String.format("%.1fMB", bytes / (1024.0 * 1024.0));
     }
 
     /**
@@ -539,8 +662,17 @@ public class MessageService {
                         replyInfo = String.format(" [Reply to: %s]", m.getMessageReference().getMessageId());
                     }
 
-                    return String.format("- (ID: %s) **[%s]** `%s`%s: ```%s```",
-                                       messageId, authorName, timestamp, replyInfo, content);
+                    // Add attachment URLs if present
+                    String attachmentInfo = "";
+                    if (!m.getAttachments().isEmpty()) {
+                        attachmentInfo = " [Attachments: " + m.getAttachments().stream()
+                            .map(a -> a.getUrl())
+                            .reduce((a, b) -> a + " , " + b)
+                            .orElse("") + "]";
+                    }
+
+                    return String.format("- (ID: %s) **[%s]** `%s`%s: ```%s```%s",
+                                       messageId, authorName, timestamp, replyInfo, content, attachmentInfo);
                 }).toList();
     }
 }
